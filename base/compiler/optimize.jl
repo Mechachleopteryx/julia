@@ -21,16 +21,20 @@ function push!(et::EdgeTracker, ci::CodeInstance)
     push!(et, ci.def)
 end
 
-struct InferenceCaches{T, S}
-    inf_cache::T
-    mi_cache::S
-end
-
-struct InliningState{S <: Union{EdgeTracker, Nothing}, T <: Union{InferenceCaches, Nothing}, V <: Union{Nothing, MethodTableView}}
+struct InliningState{S <: Union{EdgeTracker, Nothing}, T, P}
     params::OptimizationParams
     et::S
-    caches::T
-    method_table::V
+    mi_cache::T
+    policy::P
+end
+
+function default_inlining_policy(@nospecialize(src))
+    if isa(src, CodeInfo) || isa(src, Vector{UInt8})
+        src_inferred = ccall(:jl_ir_flag_inferred, Bool, (Any,), src)
+        src_inlineable = ccall(:jl_ir_flag_inlineable, Bool, (Any,), src)
+        return src_inferred && src_inlineable
+    end
+    return false
 end
 
 mutable struct OptimizationState
@@ -44,20 +48,13 @@ mutable struct OptimizationState
     const_api::Bool
     inlining::InliningState
     function OptimizationState(frame::InferenceState, params::OptimizationParams, interp::AbstractInterpreter)
-        s_edges = frame.stmt_edges[1]
-        if s_edges === nothing
-            s_edges = []
-            frame.stmt_edges[1] = s_edges
-        end
-        src = frame.src
+        s_edges = frame.stmt_edges[1]::Vector{Any}
         inlining = InliningState(params,
-            EdgeTracker(s_edges::Vector{Any}, frame.valid_worlds),
-            InferenceCaches(
-                get_inference_cache(interp),
-                WorldView(code_cache(interp), frame.world)),
-            method_table(interp))
+            EdgeTracker(s_edges, frame.valid_worlds),
+            WorldView(code_cache(interp), frame.world),
+            inlining_policy(interp))
         return new(frame.linfo,
-                   src, frame.stmt_info, frame.mod, frame.nargs,
+                   frame.src, frame.stmt_info, frame.mod, frame.nargs,
                    frame.sptypes, frame.slottypes, false,
                    inlining)
     end
@@ -88,10 +85,8 @@ mutable struct OptimizationState
         # This method is mostly used for unit testing the optimizer
         inlining = InliningState(params,
             nothing,
-            InferenceCaches(
-                get_inference_cache(interp),
-                WorldView(code_cache(interp), get_world_counter())),
-            method_table(interp))
+            WorldView(code_cache(interp), get_world_counter()),
+            inlining_policy(interp))
         return new(linfo,
                    src, stmt_info, inmodule, nargs,
                    sptypes_from_meth_instance(linfo), slottypes, false,
@@ -179,11 +174,11 @@ function stmt_affects_purity(@nospecialize(stmt), ir)
     return true
 end
 
-# run the optimization work
-function optimize(opt::OptimizationState, params::OptimizationParams, @nospecialize(result))
+# Convert IRCode back to CodeInfo and compute inlining cost and sideeffects
+function finish(opt::OptimizationState, params::OptimizationParams, ir, @nospecialize(result))
     def = opt.linfo.def
     nargs = Int(opt.nargs) - 1
-    @timeit "optimizer" ir = run_passes(opt.src, nargs, opt)
+
     force_noinline = _any(@nospecialize(x) -> isexpr(x, :meta) && x.args[1] === :noinline, ir.meta)
 
     # compute inlining and other related optimizations
@@ -271,6 +266,13 @@ function optimize(opt::OptimizationState, params::OptimizationParams, @nospecial
     nothing
 end
 
+# run the optimization work
+function optimize(interp::AbstractInterpreter, opt::OptimizationState, params::OptimizationParams, @nospecialize(result))
+    nargs = Int(opt.nargs) - 1
+    @timeit "optimizer" ir = run_passes(opt.src, nargs, opt)
+    finish(opt, params, ir, result)
+end
+
 
 # whether `f` is pure for inference
 function is_pure_intrinsic_infer(f::IntrinsicFunction)
@@ -324,19 +326,19 @@ function statement_cost(ex::Expr, line::Int, src::CodeInfo, sptypes::Vector{Any}
             # The efficiency of operations like a[i] and s.b
             # depend strongly on whether the result can be
             # inferred, so check the type of ex
-            if f === Main.Core.getfield || f === Main.Core.tuple
+            if f === Core.getfield || f === Core.tuple
                 # we might like to penalize non-inferrability, but
                 # tuple iteration/destructuring makes that impossible
                 # return plus_saturate(argcost, isknowntype(extyp) ? 1 : params.inline_nonleaf_penalty)
                 return 0
-            elseif f === Main.Core.isa
+            elseif f === Core.isa
                 # If we're in a union context, we penalize type computations
                 # on union types. In such cases, it is usually better to perform
                 # union splitting on the outside.
                 if union_penalties && isa(argextype(ex.args[2],  src, sptypes, slottypes), Union)
                     return params.inline_nonleaf_penalty
                 end
-            elseif (f === Main.Core.arrayref || f === Main.Core.const_arrayref) && length(ex.args) >= 3
+            elseif (f === Core.arrayref || f === Core.const_arrayref) && length(ex.args) >= 3
                 atyp = argextype(ex.args[3], src, sptypes, slottypes)
                 return isknowntype(atyp) ? 4 : error_path ? params.inline_error_path_cost : params.inline_nonleaf_penalty
             end
@@ -369,7 +371,7 @@ function statement_cost(ex::Expr, line::Int, src::CodeInfo, sptypes::Vector{Any}
         end
         a = ex.args[2]
         if a isa Expr
-            cost = plus_saturate(cost, statement_cost(a, -1, src, sptypes, slottypes, params, error_path))
+            cost = plus_saturate(cost, statement_cost(a, -1, src, sptypes, slottypes, union_penalties, params, error_path))
         end
         return cost
     elseif head === :copyast
@@ -390,7 +392,7 @@ function statement_or_branch_cost(@nospecialize(stmt), line::Int, src::CodeInfo,
     thiscost = 0
     if stmt isa Expr
         thiscost = statement_cost(stmt, line, src, sptypes, slottypes, union_penalties, params,
-                                  params.unoptimize_throw_blocks && line in throw_blocks)::Int
+                                  throw_blocks !== nothing && line in throw_blocks)::Int
     elseif stmt isa GotoNode
         # loops are generally always expensive
         # but assume that forward jumps are already counted for from

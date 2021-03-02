@@ -174,6 +174,7 @@ end
 (*)(x::Number, D::Diagonal) = Diagonal(x * D.diag)
 (*)(D::Diagonal, x::Number) = Diagonal(D.diag * x)
 (/)(D::Diagonal, x::Number) = Diagonal(D.diag / x)
+(\)(x::Number, D::Diagonal) = Diagonal(x \ D.diag)
 
 function (*)(Da::Diagonal, Db::Diagonal)
     nDa, mDb = size(Da, 2), size(Db, 1)
@@ -310,14 +311,6 @@ function rmul!(A::AbstractMatrix, transB::Transpose{<:Any,<:Diagonal})
     B = transB.parent
     return rmul!(A, transpose(B))
 end
-
-# Elements of `out` may not be defined (e.g., for `BigFloat`). To make
-# `mul!(out, A, B)` work for such cases, `out .*ₛ beta` short-circuits
-# `out * beta`.  Using `broadcasted` to avoid the multiplication
-# inside this function.
-function *ₛ end
-Broadcast.broadcasted(::typeof(*ₛ), out, beta) =
-    iszero(beta::Number) ? false : broadcasted(*, out, beta)
 
 # Get ambiguous method if try to unify AbstractVector/AbstractMatrix here using AbstractVecOrMat
 @inline mul!(out::AbstractVector, A::Diagonal, in::AbstractVector,
@@ -603,7 +596,6 @@ function diag(D::Diagonal, k::Integer=0)
 end
 tr(D::Diagonal) = sum(tr, D.diag)
 det(D::Diagonal) = prod(det, D.diag)
-logdet(D::Diagonal{<:Real}) = sum(log, D.diag)
 function logdet(D::Diagonal{<:Complex}) # make sure branch cut is correct
     z = sum(log, D.diag)
     complex(real(z), rem2pi(imag(z), RoundNearest))
@@ -759,4 +751,8 @@ end
 function logabsdet(A::Diagonal)
      mapreduce(x -> (log(abs(x)), sign(x)), ((d1, s1), (d2, s2)) -> (d1 + d2, s1 * s2),
                A.diag)
+end
+
+function Base.muladd(A::Diagonal, B::Diagonal, z::Diagonal)
+    Diagonal(A.diag .* B.diag .+ z.diag)
 end

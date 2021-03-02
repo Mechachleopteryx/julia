@@ -1,5 +1,29 @@
 # This file is a part of Julia. License is MIT: https://julialang.org/license
 
+@testset "range construction" begin
+    @test_throws ArgumentError range(start=1, step=1, stop=2, length=10)
+    @test_throws ArgumentError range(start=1, step=1, stop=10, length=11)
+
+    r = 3.0:2:11
+    @test r == range(start=first(r), step=step(r), stop=last(r)                  )
+    @test r == range(start=first(r), step=step(r),               length=length(r))
+    @test r == range(start=first(r),               stop=last(r), length=length(r))
+    @test r == range(                step=step(r), stop=last(r), length=length(r))
+
+    r = 4:9
+    @test r === range(start=first(r), stop=last(r)                  )
+    @test r === range(start=first(r),               length=length(r))
+    @test r === range(                stop=last(r), length=length(r))
+    @test r === range(first(r),       last(r)                       )
+    # the next ones use ==, because it changes the eltype
+    @test r ==  range(first(r),       last(r),      length(r)       )
+    @test r ==  range(start=first(r), stop=last(r), length=length(r))
+
+    for T = (Int8, Rational{Int16}, UInt32, Float64, Char)
+        @test typeof(range(start=T(5), length=3)) === typeof(range(stop=T(5), length=3))
+    end
+end
+
 using Dates, Random
 isdefined(Main, :PhysQuantities) || @eval Main include("testhelpers/PhysQuantities.jl")
 using .Main.PhysQuantities
@@ -1002,6 +1026,15 @@ end
     @test eltype(['a':'z', 1:2]) == (StepRange{T,Int} where T)
 end
 
+@testset "Ranges with <:Integer eltype but non-integer step (issue #32419)" begin
+    @test eltype(StepRange(1, 1//1, 2)) === Int
+    @test_throws ArgumentError StepRange(1, 1//2, 2)
+    @test eltype(StepRangeLen{Int}(1, 1//1, 2)) === Int
+    @test_throws ArgumentError StepRangeLen{Int}(1, 1//2, 2)
+    @test eltype(LinRange{Int}(1, 5, 3)) === Int
+    @test_throws ArgumentError LinRange{Int}(1, 5, 4)
+end
+
 @testset "LinRange ops" begin
     @test 2*LinRange(0,3,4) == LinRange(0,6,4)
     @test LinRange(0,3,4)*2 == LinRange(0,6,4)
@@ -1597,8 +1630,6 @@ end
             end
         end
     end
-    # require a keyword arg
-    @test_throws ArgumentError range(1, 100)
 end
 
 @testset "Reverse empty ranges" begin
@@ -1631,6 +1662,20 @@ end
     @test_throws MethodError mod(3, UnitRange(1.0,5.0))
     @test_throws MethodError mod(3, 1:2:7)
     @test_throws DivideError mod(3, 1:0)
+end
+
+@testset "clamp with unitrange" begin
+    for n in -10:10
+        @test clamp(n, 0:4) == clamp(n, 0, 4)
+        @test clamp(n, Base.OneTo(5)) == clamp(n, 1, 5)
+    end
+    @test clamp(Int32(3), 1:5) === Int(3)
+    @test clamp(big(typemax(Int))+99, 0:4) == 4
+    @test_throws MethodError clamp(3.141, 1:5)
+    @test_throws MethodError clamp(3, UnitRange(1.0,5.0))
+    @test_throws MethodError clamp(3, 1:2:7)
+    @test clamp(3, 1:0) == clamp(3, 1, 0) == 0
+    @test clamp(-3, 1:0) == clamp(-3, 1, 0) == 1
 end
 
 @testset "issue #33882" begin
@@ -1668,4 +1713,42 @@ end
     @test @inferred(intersect(1//1:1:5//1, 1:2:5)) == 1:2:5
     @test @inferred(intersect(big(1):big(5), 3)) == 3:3
     @test @inferred(intersect(3, big(1):big(5))) == 3:3
+end
+
+@testset "eltype of range(::Integer; step::Rational, length) (#37295)" begin
+    @test range(1, step=1//2, length=3) == [1//1, 3//2, 2//1]
+    @test eltype(range(1, step=1//2, length=3)) === Rational{Int}
+    @test typeof(step(range(1, step=1//2, length=3))) === Rational{Int}
+
+    @test range(1//1, step=2, length=3) == [1, 3, 5]
+    @test eltype(range(1//1, step=2, length=3)) === Rational{Int}
+    @test typeof(step(range(1//1, step=2, length=3))) === Int
+
+    @test range(Int16(1), step=Rational{Int8}(1,2), length=3) == [1//1, 3//2, 2//1]
+    @test eltype(range(Int16(1), step=Rational{Int8}(1,2), length=3)) === Rational{Int16}
+    @test typeof(step(range(Int16(1), step=Rational{Int8}(1,2), length=3))) === Rational{Int8}
+
+    @test range(Rational{Int8}(1), step=Int16(2), length=3) == [1, 3, 5]
+    @test eltype(range(Rational{Int8}(1), step=Int16(2), length=3)) === Rational{Int16}
+    @test typeof(step(range(Rational{Int8}(1), step=Int16(2), length=3))) === Int16
+
+    @test range('a', step=2, length=3) == ['a', 'c', 'e']
+    @test eltype(range('a', step=2, length=3)) === Char
+    @test typeof(step(range('a', step=2, length=3))) === Int
+
+    @test isempty(range(typemax(Int)//1, step=1, length=0))
+    @test eltype(range(typemax(Int)//1, step=1, length=0)) === Rational{Int}
+    @test typeof(step(range(typemax(Int)//1, step=1, length=0))) === Int
+
+    @test isempty(range(typemin(Int), step=-1//1, length=0))
+    @test eltype(range(typemin(Int), step=-1//1, length=0)) === Rational{Int}
+    @test typeof(step(range(typemin(Int), step=-1//1, length=0))) === Rational{Int}
+
+    @test StepRangeLen(Int8(1), Int8(2), 3) == Int8[1, 3, 5]
+    @test eltype(StepRangeLen(Int8(1), Int8(2), 3)) === Int8
+    @test typeof(step(StepRangeLen(Int8(1), Int8(2), 3))) === Int8
+
+    @test StepRangeLen(Int8(1), Int8(2), 3, 2) == Int8[-1, 1, 3]
+    @test eltype(StepRangeLen(Int8(1), Int8(2), 3, 2)) === Int8
+    @test typeof(step(StepRangeLen(Int8(1), Int8(2), 3, 2))) === Int8
 end

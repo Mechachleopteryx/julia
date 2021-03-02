@@ -12,7 +12,6 @@ Code coverage:
 Documentation:
 [![version 1][docs-img]](https://docs.julialang.org)
 
-[travis-img]: https://img.shields.io/travis/JuliaLang/julia/master.svg?label=Linux+/+macOS
 [appveyor-img]: https://img.shields.io/appveyor/ci/JuliaLang/julia/master.svg?label=Windows
 [coveralls-img]: https://img.shields.io/coveralls/github/JuliaLang/julia/master.svg?label=coveralls
 [codecov-img]: https://img.shields.io/codecov/c/github/JuliaLang/julia/master.svg?label=codecov
@@ -34,7 +33,7 @@ and installing Julia, below.
 - **Documentation:** <https://docs.julialang.org>
 - **Packages:** <https://julialang.org/packages/>
 - **Discussion forum:** <https://discourse.julialang.org>
-- **Slack:** <https://julialang.slack.com> (get an invite from <https://slackinvite.julialang.org>)
+- **Slack:** <https://julialang.slack.com> (get an invite from <https://julialang.org/slack/>)
 - **YouTube:** <https://www.youtube.com/user/JuliaLanguage>
 - **Code coverage:** <https://coveralls.io/r/JuliaLang/julia>
 
@@ -81,7 +80,7 @@ Julia. However, most users should use the most recent stable version
 of Julia. You can get this version by changing to the Julia directory
 and running:
 
-    git checkout v1.5.0
+    git checkout v1.5.3
 
 Now run `make` to build the `julia` executable.
 

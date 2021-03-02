@@ -37,6 +37,7 @@ const DISPLAY_FAILED = (
     :startswith,
     :endswith,
     :isempty,
+    :contains
 )
 
 #-----------------------------------------------------------------------
@@ -263,18 +264,18 @@ struct Threw <: ExecutionResult
 end
 
 function eval_test(evaluated::Expr, quoted::Expr, source::LineNumberNode, negate::Bool=false)
-    res = true
-    i = 1
     evaled_args = evaluated.args
     quoted_args = quoted.args
     n = length(evaled_args)
     kw_suffix = ""
     if evaluated.head === :comparison
         args = evaled_args
+        res = true
+        i = 1
         while i < n
             a, op, b = args[i], args[i+1], args[i+2]
             if res
-                res = op(a, b) === true  # Keep `res` type stable
+                res = op(a, b)
             end
             quoted_args[i] = a
             quoted_args[i+2] = b
@@ -283,14 +284,14 @@ function eval_test(evaluated::Expr, quoted::Expr, source::LineNumberNode, negate
 
     elseif evaluated.head === :call
         op = evaled_args[1]
-        kwargs = evaled_args[2].args  # Keyword arguments from `Expr(:parameters, ...)`
+        kwargs = (evaled_args[2]::Expr).args  # Keyword arguments from `Expr(:parameters, ...)`
         args = evaled_args[3:n]
 
-        res = op(args...; kwargs...) === true
+        res = op(args...; kwargs...)
 
         # Create "Evaluated" expression which looks like the original call but has all of
         # the arguments evaluated
-        func_sym = quoted_args[1]
+        func_sym = quoted_args[1]::Union{Symbol,Expr}
         if isempty(kwargs)
             quoted = Expr(:call, func_sym, args...)
         elseif func_sym === :≈ && !res
@@ -311,7 +312,7 @@ function eval_test(evaluated::Expr, quoted::Expr, source::LineNumberNode, negate
 
     Returned(res,
              # stringify arguments in case of failure, for easy remote printing
-             res ? quoted : sprint(io->print(IOContext(io, :limit => true), quoted))*kw_suffix,
+             res === true ? quoted : sprint(print, quoted, context=(:limit => true)) * kw_suffix,
              source)
 end
 
@@ -486,6 +487,10 @@ function get_test_result(ex, source)
                     push!(escaped_kwargs, Expr(:call, :(=>), QuoteNode(a.args[1]), esc(a.args[2])))
                 elseif isa(a, Expr) && a.head === :...
                     push!(escaped_kwargs, Expr(:..., esc(a.args[1])))
+                elseif isa(a, Expr) && a.head === :.
+                    push!(escaped_kwargs, Expr(:call, :(=>), QuoteNode(a.args[2].value), esc(Expr(:., a.args[1], QuoteNode(a.args[2].value)))))
+                elseif isa(a, Symbol)
+                    push!(escaped_kwargs, Expr(:call, :(=>), QuoteNode(a), esc(a)))
                 end
             end
         end
@@ -548,6 +553,7 @@ function do_test(result::ExecutionResult, orig_expr)
         @assert isa(result, Threw)
         testres = Error(:test_error, orig_expr, result.exception, result.backtrace, result.source)
     end
+    isa(testres, Pass) || ccall(:jl_breakpoint, Cvoid, (Any,), result)
     record(get_testset(), testres)
 end
 
@@ -753,7 +759,7 @@ struct FallbackTestSet <: AbstractTestSet end
 fallback_testset = FallbackTestSet()
 
 struct FallbackTestSetException <: Exception
-    msg::AbstractString
+    msg::String
 end
 
 function Base.showerror(io::IO, ex::FallbackTestSetException, bt; backtrace=true)
@@ -780,12 +786,13 @@ are any `Fail`s or `Error`s, an exception will be thrown only at the end,
 along with a summary of the test results.
 """
 mutable struct DefaultTestSet <: AbstractTestSet
-    description::AbstractString
-    results::Vector
+    description::String
+    results::Vector{Any}
     n_passed::Int
     anynonpass::Bool
+    verbose::Bool
 end
-DefaultTestSet(desc) = DefaultTestSet(desc, [], 0, false)
+DefaultTestSet(desc::AbstractString; verbose::Bool = false) = DefaultTestSet(String(desc)::String, [], 0, false, verbose)
 
 # For a broken result, simply store the result
 record(ts::DefaultTestSet, t::Broken) = (push!(ts.results, t); t)
@@ -1016,8 +1023,9 @@ function print_counts(ts::DefaultTestSet, depth, align,
     end
     println()
 
-    # Only print results at lower levels if we had failures
-    if np + nb != subtotal
+    # Only print results at lower levels if we had failures or if the user
+    # wants.
+    if (np + nb != subtotal) || (ts.verbose)
         for t in ts.results
             if isa(t, DefaultTestSet)
                 print_counts(t, depth + 1, align,
@@ -1059,8 +1067,9 @@ along with a summary of the test results.
 
 Any custom testset type (subtype of `AbstractTestSet`) can be given and it will
 also be used for any nested `@testset` invocations. The given options are only
-applied to the test set where they are given. The default test set type does
-not take any options.
+applied to the test set where they are given. The default test set type
+accepts the `verbose` boolean option: if `true`, the result summary of the
+nested testsets is shown even when they all pass (the default is `false`).
 
 The description string accepts interpolation from the loop indices.
 If no description is provided, one is constructed based on the variables.
@@ -1294,7 +1303,7 @@ end
 """
     push_testset(ts::AbstractTestSet)
 
-Adds the test set to the task_local_storage.
+Adds the test set to the `task_local_storage`.
 """
 function push_testset(ts::AbstractTestSet)
     testsets = get(task_local_storage(), :__BASETESTNEXT__, AbstractTestSet[])
@@ -1305,7 +1314,7 @@ end
 """
     pop_testset()
 
-Pops the last test set added to the task_local_storage. If there are no
+Pops the last test set added to the `task_local_storage`. If there are no
 active test sets, returns the fallback default test set.
 """
 function pop_testset()
@@ -1350,10 +1359,11 @@ julia> typeof(f(2))
 Int64
 
 julia> @code_warntype f(2)
-Variables
+MethodInstance for f(::Int64)
+  from f(a) in Main at none:1
+Arguments
   #self#::Core.Const(f)
   a::Int64
-
 Body::UNION{FLOAT64, INT64}
 1 ─ %1 = (a > 1)::Bool
 └──      goto #3 if not %1
@@ -1397,7 +1407,7 @@ function _inferred(ex, mod, allow = :(Union{}))
     end
     Meta.isexpr(ex, :call)|| error("@inferred requires a call expression")
     farg = ex.args[1]
-    if isa(farg, Symbol) && first(string(farg)) == '.'
+    if isa(farg, Symbol) && farg !== :.. && first(string(farg)) == '.'
         farg = Symbol(string(farg)[2:end])
         ex = Expr(:call, GlobalRef(Test, :_materialize_broadcasted),
             farg, ex.args[2:end]...)
@@ -1451,10 +1461,10 @@ Use `recursive=true` to test in all submodules.
 `Union{}` type parameters are included; in most cases you probably
 want to set this to `false`. See [`Base.isambiguous`](@ref).
 """
-function detect_ambiguities(mods...;
+function detect_ambiguities(mods::Module...;
                             recursive::Bool = false,
                             ambiguous_bottom::Bool = false)
-    @nospecialize mods
+    @nospecialize
     ambs = Set{Tuple{Method,Method}}()
     mods = collect(mods)::Vector{Module}
     function sortdefs(m1::Method, m2::Method)
@@ -1577,9 +1587,8 @@ function constrains_param(var::TypeVar, @nospecialize(typ), covariant::Bool)
                 end
                 lastp = typ.parameters[fc]
                 vararg = Base.unwrap_unionall(lastp)
-                if vararg isa DataType && vararg.name === Base._va_typename
-                    N = vararg.parameters[2]
-                    constrains_param(var, N, covariant) && return true
+                if vararg isa Core.TypeofVararg && isdefined(vararg, :N)
+                    constrains_param(var, vararg.N, covariant) && return true
                     # T = vararg.parameters[1] doesn't constrain var
                 else
                     constrains_param(var, lastp, covariant) && return true

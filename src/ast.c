@@ -32,9 +32,9 @@ jl_sym_t *empty_sym;   jl_sym_t *top_sym;
 jl_sym_t *module_sym;  jl_sym_t *slot_sym;
 jl_sym_t *export_sym;  jl_sym_t *import_sym;
 jl_sym_t *toplevel_sym; jl_sym_t *quote_sym;
-jl_sym_t *line_sym;    jl_sym_t *jl_incomplete_sym;
+jl_sym_t *line_sym;    jl_sym_t *incomplete_sym;
 jl_sym_t *goto_sym;    jl_sym_t *goto_ifnot_sym;
-jl_sym_t *return_sym;
+jl_sym_t *return_sym;  jl_sym_t *lineinfo_sym;
 jl_sym_t *lambda_sym;  jl_sym_t *assign_sym;
 jl_sym_t *globalref_sym; jl_sym_t *do_sym;
 jl_sym_t *method_sym;  jl_sym_t *core_sym;
@@ -43,6 +43,8 @@ jl_sym_t *pop_exception_sym;
 jl_sym_t *exc_sym;     jl_sym_t *error_sym;
 jl_sym_t *new_sym;     jl_sym_t *using_sym;
 jl_sym_t *splatnew_sym;
+jl_sym_t *new_opaque_closure_sym;
+jl_sym_t *opaque_closure_method_sym;
 jl_sym_t *const_sym;   jl_sym_t *thunk_sym;
 jl_sym_t *foreigncall_sym; jl_sym_t *as_sym;
 jl_sym_t *global_sym; jl_sym_t *list_sym;
@@ -56,6 +58,7 @@ jl_sym_t *static_parameter_sym; jl_sym_t *inline_sym;
 jl_sym_t *noinline_sym; jl_sym_t *generated_sym;
 jl_sym_t *generated_only_sym; jl_sym_t *isdefined_sym;
 jl_sym_t *propagate_inbounds_sym; jl_sym_t *specialize_sym;
+jl_sym_t *aggressive_constprop_sym;
 jl_sym_t *nospecialize_sym; jl_sym_t *macrocall_sym;
 jl_sym_t *colon_sym; jl_sym_t *hygienicscope_sym;
 jl_sym_t *throw_undef_if_not_sym; jl_sym_t *getfield_undefref_sym;
@@ -340,7 +343,8 @@ void jl_init_common_symbols(void)
     core_sym = jl_symbol("core");
     globalref_sym = jl_symbol("globalref");
     line_sym = jl_symbol("line");
-    jl_incomplete_sym = jl_symbol("incomplete");
+    lineinfo_sym = jl_symbol("lineinfo");
+    incomplete_sym = jl_symbol("incomplete");
     error_sym = jl_symbol("error");
     goto_sym = jl_symbol("goto");
     goto_ifnot_sym = jl_symbol("gotoifnot");
@@ -358,6 +362,8 @@ void jl_init_common_symbols(void)
     pop_exception_sym = jl_symbol("pop_exception");
     new_sym = jl_symbol("new");
     splatnew_sym = jl_symbol("splatnew");
+    new_opaque_closure_sym = jl_symbol("new_opaque_closure");
+    opaque_closure_method_sym = jl_symbol("opaque_closure_method");
     const_sym = jl_symbol("const");
     global_sym = jl_symbol("global");
     thunk_sym = jl_symbol("thunk");
@@ -380,6 +386,7 @@ void jl_init_common_symbols(void)
     noinline_sym = jl_symbol("noinline");
     polly_sym = jl_symbol("polly");
     propagate_inbounds_sym = jl_symbol("propagate_inbounds");
+    aggressive_constprop_sym = jl_symbol("aggressive_constprop");
     isdefined_sym = jl_symbol("isdefined");
     nospecialize_sym = jl_symbol("nospecialize");
     specialize_sym = jl_symbol("specialize");
@@ -558,6 +565,23 @@ static jl_value_t *scm_to_julia_(fl_context_t *fl_ctx, value_t e, jl_module_t *m
             JL_GC_POP();
             return temp;
         }
+        else if (sym == lineinfo_sym && n == 5) {
+            jl_value_t *modu=NULL, *name=NULL, *file=NULL, *linenum=NULL, *inlinedat=NULL;
+            JL_GC_PUSH5(&modu, &name, &file, &linenum, &inlinedat);
+            value_t lst = e;
+            modu = scm_to_julia_(fl_ctx, car_(lst), mod);
+            lst = cdr_(lst);
+            name = scm_to_julia_(fl_ctx, car_(lst), mod);
+            lst = cdr_(lst);
+            file = scm_to_julia_(fl_ctx, car_(lst), mod);
+            lst = cdr_(lst);
+            linenum = scm_to_julia_(fl_ctx, car_(lst), mod);
+            lst = cdr_(lst);
+            inlinedat = scm_to_julia_(fl_ctx, car_(lst), mod);
+            temp = jl_new_struct(jl_lineinfonode_type, modu, name, file, linenum, inlinedat);
+            JL_GC_POP();
+            return temp;
+        }
         JL_GC_PUSH2(&ex, &temp);
         if (sym == goto_sym) {
             ex = scm_to_julia_(fl_ctx, car_(e), mod);
@@ -596,13 +620,6 @@ static jl_value_t *scm_to_julia_(fl_context_t *fl_ctx, value_t e, jl_module_t *m
         else if (iscons(e) && (sym == inert_sym || (sym == quote_sym && (!iscons(car_(e)))))) {
             ex = scm_to_julia_(fl_ctx, car_(e), mod);
             temp = jl_new_struct(jl_quotenode_type, ex);
-        }
-        else if (sym == thunk_sym) {
-            ex = scm_to_julia_(fl_ctx, car_(e), mod);
-            assert(jl_is_code_info(ex));
-            jl_linenumber_to_lineinfo((jl_code_info_t*)ex, mod, (jl_value_t*)jl_symbol("top-level scope"));
-            temp = (jl_value_t*)jl_exprn(sym, 1);
-            jl_exprargset(temp, 0, ex);
         }
         if (temp) {
             JL_GC_POP();
@@ -882,7 +899,44 @@ static jl_value_t *jl_call_scm_on_ast_and_loc(const char *funcname, jl_value_t *
 
 JL_DLLEXPORT jl_value_t *jl_copy_ast(jl_value_t *expr)
 {
-    if (expr && jl_is_expr(expr)) {
+    if (!expr)
+        return NULL;
+    if (jl_is_code_info(expr)) {
+        jl_code_info_t *new_ci = (jl_code_info_t *)expr;
+        jl_array_t *new_code = NULL;
+        JL_GC_PUSH2(&new_ci, &new_code);
+        new_ci = jl_copy_code_info(new_ci);
+        new_code = jl_array_copy(new_ci->code);
+        size_t clen = jl_array_len(new_code);
+        for (int i = 0; i < clen; ++i) {
+            jl_array_ptr_set(new_code, i, jl_copy_ast(
+                jl_array_ptr_ref(new_code, i)
+            ));
+        }
+        new_ci->slotnames = jl_array_copy(new_ci->slotnames);
+        jl_gc_wb(new_ci, new_ci->slotnames);
+        new_ci->slotflags = jl_array_copy(new_ci->slotflags);
+        jl_gc_wb(new_ci, new_ci->slotflags);
+        new_ci->codelocs = jl_array_copy(new_ci->codelocs);
+        jl_gc_wb(new_ci, new_ci->codelocs);
+        new_ci->linetable = jl_array_copy(new_ci->linetable);
+        jl_gc_wb(new_ci, new_ci->linetable);
+        new_ci->ssaflags = jl_array_copy(new_ci->ssaflags);
+        jl_gc_wb(new_ci, new_ci->ssaflags);
+
+        if (new_ci->edges != jl_nothing) {
+            new_ci->edges = jl_array_copy(new_ci->edges);
+            jl_gc_wb(new_ci, new_ci->edges);
+        }
+
+        if (jl_is_array(new_ci->ssavaluetypes)) {
+            new_ci->ssavaluetypes = jl_array_copy(new_ci->ssavaluetypes);
+            jl_gc_wb(new_ci, new_ci->ssavaluetypes);
+        }
+        JL_GC_POP();
+        return new_ci;
+    }
+    if (jl_is_expr(expr)) {
         jl_expr_t *e = (jl_expr_t*)expr;
         size_t i, l = jl_array_len(e->args);
         jl_expr_t *ne = jl_exprn(e->head, l);
@@ -893,6 +947,24 @@ JL_DLLEXPORT jl_value_t *jl_copy_ast(jl_value_t *expr)
         }
         JL_GC_POP();
         return (jl_value_t*)ne;
+    }
+    if (jl_is_phinode(expr)) {
+        jl_array_t *edges = (jl_array_t*)jl_fieldref_noalloc(expr, 0);
+        jl_array_t *values = (jl_array_t*)jl_fieldref_noalloc(expr, 1);
+        JL_GC_PUSH2(&edges, &values);
+        edges = jl_array_copy(edges);
+        values = jl_array_copy(values);
+        jl_value_t *ret = jl_new_struct(jl_phinode_type, edges, values);
+        JL_GC_POP();
+        return ret;
+    }
+    if (jl_is_phicnode(expr)) {
+        jl_array_t *values = (jl_array_t*)jl_fieldref_noalloc(expr, 0);
+        JL_GC_PUSH1(&values);
+        values = jl_array_copy(values);
+        jl_value_t *ret = jl_new_struct(jl_phinode_type, values);
+        JL_GC_POP();
+        return ret;
     }
     return expr;
 }
@@ -920,6 +992,15 @@ JL_DLLEXPORT int jl_is_unary_and_binary_operator(char *sym)
     jl_ast_context_t *ctx = jl_ast_ctx_enter();
     fl_context_t *fl_ctx = &ctx->fl;
     int res = fl_applyn(fl_ctx, 1, symbol_value(symbol(fl_ctx, "unary-and-binary-op?")), symbol(fl_ctx, sym)) == fl_ctx->T;
+    jl_ast_ctx_leave(ctx);
+    return res;
+}
+
+JL_DLLEXPORT int jl_is_syntactic_operator(char *sym)
+{
+    jl_ast_context_t *ctx = jl_ast_ctx_enter();
+    fl_context_t *fl_ctx = &ctx->fl;
+    int res = fl_applyn(fl_ctx, 1, symbol_value(symbol(fl_ctx, "syntactic-op?")), symbol(fl_ctx, sym)) == fl_ctx->T;
     jl_ast_ctx_leave(ctx);
     return res;
 }
@@ -1017,12 +1098,6 @@ static jl_value_t *jl_expand_macros(jl_value_t *expr, jl_module_t *inmodule, str
     if (e->head == quote_sym && jl_expr_nargs(e) == 1) {
         expr = jl_call_scm_on_ast("julia-bq-macro", jl_exprarg(e, 0), inmodule);
         JL_GC_PUSH1(&expr);
-        if (macroctx) {
-            // in a macro, `quote` also implies `escape`
-            jl_expr_t *e2 = jl_exprn(escape_sym, 1);
-            jl_array_ptr_set(e2->args, 0, expr);
-            expr = (jl_value_t*)e2;
-        }
         expr = jl_expand_macros(expr, inmodule, macroctx, onelevel, world);
         JL_GC_POP();
         return expr;

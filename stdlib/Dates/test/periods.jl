@@ -366,6 +366,7 @@ end
     @test isequal(d - h, 2d - 2h - 1d + 1h)
     @test sprint(show, y + m) == string(y + m)
     @test convert(Dates.CompoundPeriod, y) + m == y + m
+    @test Dates.periods(convert(Dates.CompoundPeriod, y)) == convert(Dates.CompoundPeriod, y).periods
 end
 @testset "compound period simplification" begin
     # reduce compound periods into the most basic form
@@ -504,5 +505,19 @@ end
     @test Dates.toms(Dates.Second(1) + Dates.Microsecond(1)) == 1e3
 end
 
+@testset "CompoundPeriod and Period isless()" begin
+    #tests for allowed comparisons
+    #FixedPeriod
+    @test (h - ms < h + ns) == true
+    @test (h + ns < h -ms) == false
+    @test (h  < h -ms) == false
+    @test (h-ms  < h) == true
+    #OtherPeriod
+    @test (2y-m < 25m+1y) == true
+    @test (2y < 25m+1y) == true
+    @test (25m+1y < 2y) == false
+    #Test combined Fixed and Other Periods
+    @test (1m + 1d < 1m + 1s) == false
+end
 end
 

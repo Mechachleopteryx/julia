@@ -347,6 +347,9 @@ overwriting the existing value of `C`.
 !!! tip
     Bounds checking can be disabled by [`@inbounds`](@ref), but you need to take care of the shape
     of `C`, `A`, `B` yourself.
+
+!!! compat "Julia 1.6"
+    This function requires Julia 1.6 or later.
 """
 @inline function kron!(C::AbstractMatrix, A::AbstractMatrix, B::AbstractMatrix)
     require_one_based_indexing(A, B)
@@ -1284,12 +1287,10 @@ function factorize(A::StridedMatrix{T}) where T
                 return Bidiagonal(diag(A), diag(A, 1), :U)
             end
             if utri1
-                if (herm & (T <: Complex)) | sym
-                    try
-                        return ldlt!(SymTridiagonal(diag(A), diag(A, -1)))
-                    catch
-                    end
-                end
+                # TODO: enable once a specialized, non-dense bunchkaufman method exists
+                # if (herm & (T <: Complex)) | sym
+                    # return bunchkaufman(SymTridiagonal(diag(A), diag(A, -1)))
+                # end
                 return lu(Tridiagonal(diag(A, -1), diag(A), diag(A, 1)))
             end
         end

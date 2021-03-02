@@ -321,6 +321,8 @@ end
         pop!(need_to_handle_undef_sparam, which(Base._cat, Tuple{Any, AbstractArray}))
         pop!(need_to_handle_undef_sparam, which(Base.byteenv, (Union{AbstractArray{Pair{T,V}, 1}, Tuple{Vararg{Pair{T,V}}}} where {T<:AbstractString,V},)))
         pop!(need_to_handle_undef_sparam, which(Base.float, Tuple{AbstractArray{Union{Missing, T},N} where {T, N}}))
+        pop!(need_to_handle_undef_sparam, which(Base.float, Tuple{Type{Union{Missing, T}} where T}))
+        pop!(need_to_handle_undef_sparam, which(Base.complex, Tuple{Type{Union{Missing, T}} where T}))
         pop!(need_to_handle_undef_sparam, which(Base.zero, Tuple{Type{Union{Missing, T}} where T}))
         pop!(need_to_handle_undef_sparam, which(Base.one, Tuple{Type{Union{Missing, T}} where T}))
         pop!(need_to_handle_undef_sparam, which(Base.oneunit, Tuple{Type{Union{Missing, T}} where T}))
@@ -356,6 +358,14 @@ f35983(::Type{Int16}, ::Any) = 3
 let ambig = Int32[0]
     ms = Base._methods_by_ftype(Tuple{typeof(f35983), Type, Type}, -1, typemax(UInt), true, UInt[typemin(UInt)], UInt[typemax(UInt)], ambig)
     @test length(ms) == 2
+    @test ambig[1] == 1
+end
+
+struct B38280 <: Real; val; end
+let ambig = Int32[0]
+    ms = Base._methods_by_ftype(Tuple{Type{B38280}, Any}, 1, typemax(UInt), false, UInt[typemin(UInt)], UInt[typemax(UInt)], ambig)
+    @test ms isa Vector
+    @test length(ms) == 1
     @test ambig[1] == 1
 end
 

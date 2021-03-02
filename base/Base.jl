@@ -201,9 +201,9 @@ include("iobuffer.jl")
 # strings & printing
 include("intfuncs.jl")
 include("strings/strings.jl")
+include("regex.jl")
 include("parse.jl")
 include("shell.jl")
-include("regex.jl")
 include("show.jl")
 include("arrayshow.jl")
 include("methodshow.jl")
@@ -324,9 +324,6 @@ using .MPFR
 
 include("combinatorics.jl")
 
-# more hashing definitions
-include("hashing2.jl")
-
 # irrational mathematical constants
 include("irrationals.jl")
 include("mathconstants.jl")
@@ -394,6 +391,41 @@ end_base_include = time_ns()
 const _sysimage_modules = PkgId[]
 in_sysimage(pkgid::PkgId) = pkgid in _sysimage_modules
 
+# Precompiles for Revise
+# TODO: move these to contrib/generate_precompile.jl
+# The problem is they don't work there
+for match = _methods(+, (Int, Int), -1, get_world_counter())
+    m = match.method
+    delete!(push!(Set{Method}(), m), m)
+    copy(Core.Compiler.retrieve_code_info(Core.Compiler.specialize_method(match)))
+
+    empty!(Set())
+    push!(push!(Set{Union{GlobalRef,Symbol}}(), :two), GlobalRef(Base, :two))
+    (setindex!(Dict{String,Base.PkgId}(), Base.PkgId(Base), "file.jl"))["file.jl"]
+    (setindex!(Dict{Symbol,Vector{Int}}(), [1], :two))[:two]
+    (setindex!(Dict{Base.PkgId,String}(), "file.jl", Base.PkgId(Base)))[Base.PkgId(Base)]
+    (setindex!(Dict{Union{GlobalRef,Symbol}, Vector{Int}}(), [1], :two))[:two]
+    (setindex!(IdDict{Type, Union{Missing, Vector{Tuple{LineNumberNode, Expr}}}}(), missing, Int))[Int]
+    Dict{Symbol, Union{Nothing, Bool, Symbol}}(:one => false)[:one]
+    Dict(Base => [:(1+1)])[Base]
+    Dict(:one => [1])[:one]
+    Dict("abc" => Set())["abc"]
+    pushfirst!([], sum)
+    get(Base.pkgorigins, Base.PkgId(Base), nothing)
+    sort!([1,2,3])
+    unique!([1,2,3])
+    cumsum([1,2,3])
+    append!(Int[], BitSet())
+    isempty(BitSet())
+    delete!(BitSet([1,2]), 3)
+    deleteat!(Int32[1,2,3], [1,3])
+    deleteat!(Any[1,2,3], [1,3])
+    Core.svec(1, 2) == Core.svec(3, 4)
+    any(t->t[1].line > 1, [(LineNumberNode(2,:none), :(1+1))])
+
+    break   # only actually need to do this once
+end
+
 if is_primary_base_module
 function __init__()
     # try to ensuremake sure OpenBLAS does not set CPU affinity (#1070, #9639)
@@ -419,6 +451,9 @@ function __init__()
     init_load_path()
     init_active_project()
     append!(empty!(_sysimage_modules), keys(loaded_modules))
+    if haskey(ENV, "JULIA_MAX_NUM_PRECOMPILE_FILES")
+        MAX_NUM_PRECOMPILE_FILES[] = parse(Int, ENV["JULIA_MAX_NUM_PRECOMPILE_FILES"])
+    end
     nothing
 end
 

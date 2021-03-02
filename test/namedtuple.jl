@@ -21,9 +21,20 @@
 @test (a=3,)[:a] == 3
 @test (x=4, y=5, z=6).y == 5
 @test (x=4, y=5, z=6).z == 6
+@test (x=4, y=5, z=6)[(:x, :y)] == (x=4, y=5)
+@test (x=4, y=5, z=6)[(:x,)] == (x=4,)
+@test (x=4, y=5, z=6)[[:x, :y]] == (x=4, y=5)
+@test (x=4, y=5, z=6)[[:x]] == (x=4,)
+@test (x=4, y=5, z=6)[()] == NamedTuple()
+@test NamedTuple()[()] == NamedTuple()
 @test_throws ErrorException (x=4, y=5, z=6).a
 @test_throws BoundsError (a=2,)[0]
 @test_throws BoundsError (a=2,)[2]
+@test_throws ErrorException (x=4, y=5, z=6)[(:a,)]
+@test_throws ErrorException (x=4, y=5, z=6)[(:x, :a)]
+@test_throws ErrorException (x=4, y=5, z=6)[[:a]]
+@test_throws ErrorException (x=4, y=5, z=6)[[:x, :a]]
+@test_throws ErrorException (x=4, y=5, z=6)[(:x, :x)]
 
 @test length(NamedTuple()) == 0
 @test length((a=1,)) == 1
@@ -167,7 +178,7 @@ namedtuple_get_a(x) = x.a
 @test Base.return_types(namedtuple_get_a, (typeof((b=1,a="")),)) == Any[String]
 
 namedtuple_fieldtype_a(x) = fieldtype(typeof(x), :a)
-@test Base.return_types(namedtuple_fieldtype_a, (NamedTuple,)) == Any[Type]
+@test Base.return_types(namedtuple_fieldtype_a, (NamedTuple,)) == Any[Union{Type, TypeVar}]
 @test Base.return_types(namedtuple_fieldtype_a, (typeof((b=1,a="")),)) == Any[Type{String}]
 namedtuple_fieldtype__(x, y) = fieldtype(typeof(x), y)
 @test Base.return_types(namedtuple_fieldtype__, (typeof((b=1,a="")),Symbol))[1] >: Union{Type{Int}, Type{String}}

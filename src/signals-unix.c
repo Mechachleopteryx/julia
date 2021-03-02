@@ -1,5 +1,7 @@
 // This file is a part of Julia. License is MIT: https://julialang.org/license
 
+// Note that this file is `#include`d by "signal-handling.c"
+
 #include <signal.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -41,6 +43,7 @@
 
 #include "julia_assert.h"
 
+// helper function for returning the unw_context_t inside a ucontext_t
 static bt_context_t *jl_to_bt_context(void *sigctx)
 {
 #ifdef __APPLE__
@@ -222,9 +225,69 @@ static void sigdie_handler(int sig, siginfo_t *info, void *context)
     // fall-through return to re-execute faulting statement (but without the error handler)
 }
 
+#if defined(_CPU_X86_64_) || defined(_CPU_X86_)
+enum x86_trap_flags {
+    USER_MODE = 0x4,
+    WRITE_FAULT = 0x2,
+    PAGE_PRESENT = 0x1
+};
+
+int exc_reg_is_write_fault(uintptr_t err) {
+    return err & WRITE_FAULT;
+}
+#elif defined(_CPU_AARCH64_)
+enum aarch64_esr_layout {
+    EC_MASK = ((uint32_t)0b111111) << 26,
+    EC_DATA_ABORT = ((uint32_t)0b100100) << 26,
+    ISR_DA_WnR = ((uint32_t)1) << 6
+};
+
+int exc_reg_is_write_fault(uintptr_t esr) {
+    return (esr & EC_MASK) == EC_DATA_ABORT && (esr & ISR_DA_WnR);
+}
+#endif
+
 #if defined(HAVE_MACH)
-#include <signals-mach.c>
+#include "signals-mach.c"
 #else
+
+
+#if defined(_OS_LINUX_) && (defined(_CPU_X86_64_) || defined(_CPU_X86_))
+int is_write_fault(void *context) {
+    ucontext_t *ctx = (ucontext_t*)context;
+    return exc_reg_is_write_fault(ctx->uc_mcontext.gregs[REG_ERR]);
+}
+#elif defined(_OS_LINUX_) && defined(_CPU_AARCH64_)
+struct linux_aarch64_ctx_header {
+	uint32_t magic;
+	uint32_t size;
+};
+const uint32_t linux_esr_magic = 0x45535201;
+
+int is_write_fault(void *context) {
+    ucontext_t *ctx = (ucontext_t*)context;
+    struct linux_aarch64_ctx_header *extra =
+        (struct linux_aarch64_ctx_header *)ctx->uc_mcontext.__reserved;
+    while (extra->magic != 0) {
+        if (extra->magic == linux_esr_magic) {
+            return exc_reg_is_write_fault(*(uint64_t*)&extra[1]);
+        }
+        extra = (struct linux_aarch64_ctx_header *)
+            (((uint8_t*)extra) + extra->size);
+    }
+    return 0;
+}
+#elif defined(_OS_FREEBSD_) && (defined(_CPU_X86_64_) || defined(_CPU_X86_))
+int is_write_fault(void *context) {
+    ucontext_t *ctx = (ucontext_t*)context;
+    return exc_reg_is_write_fault(ctx->uc_mcontext.mc_err);
+}
+#else
+#warning Implement this query for consistent PROT_NONE handling
+int is_write_fault(void *context) {
+    return 0;
+}
+#endif
 
 static int is_addr_on_sigstack(jl_ptls_t ptls, void *ptr)
 {
@@ -270,7 +333,7 @@ static void segv_handler(int sig, siginfo_t *info, void *context)
         jl_safe_printf("ERROR: Signal stack overflow, exit\n");
         _exit(sig + 128);
     }
-    else if (sig == SIGSEGV && info->si_code == SEGV_ACCERR) {  // writing to read-only memory (e.g., mmap)
+    else if (sig == SIGSEGV && info->si_code == SEGV_ACCERR && is_write_fault(context)) {  // writing to read-only memory (e.g., mmap)
         jl_throw_in_ctx(ptls, jl_readonlymemory_exception, sig, context);
     }
     else {
@@ -430,13 +493,12 @@ JL_DLLEXPORT int jl_profile_start_timer(void)
         return -2;
 
     // Start the timer
-    itsprof.it_interval.tv_sec = nsecprof/GIGA;
-    itsprof.it_interval.tv_nsec = nsecprof%GIGA;
-    itsprof.it_value.tv_sec = nsecprof/GIGA;
-    itsprof.it_value.tv_nsec = nsecprof%GIGA;
+    itsprof.it_interval.tv_sec = 0;
+    itsprof.it_interval.tv_nsec = 0;
+    itsprof.it_value.tv_sec = nsecprof / GIGA;
+    itsprof.it_value.tv_nsec = nsecprof % GIGA;
     if (timer_settime(timerprof, 0, &itsprof, NULL) == -1)
         return -3;
-
     running = 1;
     return 0;
 }
@@ -456,25 +518,23 @@ struct itimerval timerprof;
 
 JL_DLLEXPORT int jl_profile_start_timer(void)
 {
-    timerprof.it_interval.tv_sec = nsecprof/GIGA;
-    timerprof.it_interval.tv_usec = (nsecprof%GIGA)/1000;
-    timerprof.it_value.tv_sec = nsecprof/GIGA;
-    timerprof.it_value.tv_usec = (nsecprof%GIGA)/1000;
-    if (setitimer(ITIMER_PROF, &timerprof, 0) == -1)
+    timerprof.it_interval.tv_sec = 0;
+    timerprof.it_interval.tv_usec = 0;
+    timerprof.it_value.tv_sec = nsecprof / GIGA;
+    timerprof.it_value.tv_usec = ((nsecprof % GIGA) + 999) / 1000;
+    if (setitimer(ITIMER_PROF, &timerprof, NULL) == -1)
         return -3;
-
     running = 1;
-
     return 0;
 }
 
 JL_DLLEXPORT void jl_profile_stop_timer(void)
 {
     if (running) {
+        running = 0;
         memset(&timerprof, 0, sizeof(timerprof));
-        setitimer(ITIMER_PROF, &timerprof, 0);
+        setitimer(ITIMER_PROF, &timerprof, NULL);
     }
-    running = 0;
 }
 
 #else
@@ -566,6 +626,9 @@ static void *signal_listener(void *arg)
     sigset_t sset;
     int sig, critical, profile;
     jl_sigsetset(&sset);
+#if defined(_POSIX_C_SOURCE) && _POSIX_C_SOURCE >= 199309L
+    siginfo_t info;
+#endif
 #ifdef HAVE_KEVENT
     struct kevent ev;
     int sigqueue = kqueue();
@@ -610,7 +673,6 @@ static void *signal_listener(void *arg)
         else
 #endif
 #if defined(_POSIX_C_SOURCE) && _POSIX_C_SOURCE >= 199309L
-        siginfo_t info;
         sig = sigwaitinfo(&sset, &info);
 #else
         if (sigwait(&sset, &sig))
@@ -621,6 +683,7 @@ static void *signal_listener(void *arg)
                 continue;
             sig = SIGABRT; // this branch can't occur, unless we had stack memory corruption of sset
         }
+        profile = 0;
 #ifndef HAVE_MACH
 #if defined(HAVE_TIMER)
         profile = (sig == SIGUSR1);
@@ -690,7 +753,11 @@ static void *signal_listener(void *arg)
 
             // do backtrace for profiler
             if (profile && running) {
-                if (bt_size_cur < bt_size_max - 1) {
+                if (jl_profile_is_buffer_full()) {
+                    // Buffer full: Delete the timer
+                    jl_profile_stop_timer();
+                }
+                else {
                     // unwinding can fail, so keep track of the current state
                     // and restore from the SEGV handler if anything happens.
                     jl_ptls_t ptls = jl_get_ptls_states();
@@ -710,10 +777,6 @@ static void *signal_listener(void *arg)
                     // Mark the end of this block with 0
                     bt_data_prof[bt_size_cur++].uintptr = 0;
                 }
-                if (bt_size_cur >= bt_size_max - 1) {
-                    // Buffer full: Delete the timer
-                    jl_profile_stop_timer();
-                }
             }
 
             // notify thread to resume
@@ -721,6 +784,15 @@ static void *signal_listener(void *arg)
         }
         if (critical || profile)
             jl_unlock_profile();
+#ifndef HAVE_MACH
+        if (profile && running) {
+#if defined(HAVE_TIMER)
+            timer_settime(timerprof, 0, &itsprof, NULL);
+#elif defined(HAVE_ITIMER)
+            setitimer(ITIMER_PROF, &timerprof, NULL);
+#endif
+        }
+#endif
 #endif
 
         // this part is async with the running of the rest of the program

@@ -3,39 +3,31 @@
 @inline isexpr(@nospecialize(stmt), head::Symbol) = isa(stmt, Expr) && stmt.head === head
 Core.PhiNode() = Core.PhiNode(Int32[], Any[])
 
-"""
-Like UnitRange{Int}, but can handle the `last` field, being temporarily
-< first (this can happen during compacting)
-"""
-struct StmtRange <: AbstractUnitRange{Int}
-    start::Int
-    stop::Int
-end
-first(r::StmtRange) = r.start
-last(r::StmtRange) = r.stop
-iterate(r::StmtRange, state=0) = (last(r) - first(r) < state) ? nothing : (first(r) + state, state + 1)
-
-StmtRange(range::UnitRange{Int}) = StmtRange(first(range), last(range))
-
-struct BasicBlock
-    stmts::StmtRange
-    preds::Vector{Int}
-    succs::Vector{Int}
-end
-function BasicBlock(stmts::StmtRange)
-    return BasicBlock(stmts, Int[], Int[])
-end
-function BasicBlock(old_bb, stmts)
-    return BasicBlock(stmts, old_bb.preds, old_bb.succs)
-end
-copy(bb::BasicBlock) = BasicBlock(bb.stmts, copy(bb.preds), copy(bb.succs))
+isterminator(@nospecialize(stmt)) = isa(stmt, GotoNode) || isa(stmt, GotoIfNot) || isa(stmt, ReturnNode)
 
 struct CFG
     blocks::Vector{BasicBlock}
     index::Vector{Int} # map from instruction => basic-block number
                        # TODO: make this O(1) instead of O(log(n_blocks))?
 end
+
 copy(c::CFG) = CFG(BasicBlock[copy(b) for b in c.blocks], copy(c.index))
+
+function cfg_insert_edge!(cfg::CFG, from::Int, to::Int)
+    # Assumes that this edge does not already exist
+    push!(cfg.blocks[to].preds, from)
+    push!(cfg.blocks[from].succs, to)
+    nothing
+end
+
+function cfg_delete_edge!(cfg::CFG, from::Int, to::Int)
+    preds = cfg.blocks[to].preds
+    succs = cfg.blocks[from].succs
+    # Assumes that blocks appear at most once in preds and succs
+    deleteat!(preds, findfirst(x->x === from, preds)::Int)
+    deleteat!(succs, findfirst(x->x === to, succs)::Int)
+    nothing
+end
 
 function block_for_inst(index::Vector{Int}, inst::Int)
     return searchsortedfirst(index, inst, lt=(<=))
@@ -147,6 +139,7 @@ function compute_basic_blocks(stmts::Vector{Any})
     return CFG(blocks, basic_block_index)
 end
 
+# this function assumes insert position exists
 function first_insert_for_bb(code, cfg::CFG, block::Int)
     for idx in cfg.blocks[block].stmts
         stmt = code[idx]
@@ -154,6 +147,7 @@ function first_insert_for_bb(code, cfg::CFG, block::Int)
             return idx
         end
     end
+    error("any insert position isn't found")
 end
 
 # SSA-indexed nodes
@@ -383,7 +377,8 @@ function is_relevant_expr(e::Expr)
                       :gc_preserve_begin, :gc_preserve_end,
                       :foreigncall, :isdefined, :copyast,
                       :undefcheck, :throw_undef_if_not,
-                      :cfunction, :method, :pop_exception)
+                      :cfunction, :method, :pop_exception,
+                      :new_opaque_closure)
 end
 
 function setindex!(x::UseRef, @nospecialize(v))
@@ -550,8 +545,9 @@ mutable struct IncrementalCompact
         if allow_cfg_transforms
             bb_rename = Vector{Int}(undef, length(blocks))
             cur_bb = 1
+            domtree = construct_domtree(blocks)
             for i = 1:length(bb_rename)
-                if i != 1 && length(blocks[i].preds) == 0
+                if bb_unreachable(domtree, i)
                     bb_rename[i] = -1
                 else
                     bb_rename[i] = cur_bb
@@ -715,7 +711,9 @@ end
 function insert_node_here!(compact::IncrementalCompact, @nospecialize(val), @nospecialize(typ), ltable_idx::Int32, reverse_affinity::Bool=false)
     refinish = false
     result_idx = compact.result_idx
-    if result_idx == first(compact.result_bbs[compact.active_result_bb].stmts) && reverse_affinity
+    if reverse_affinity &&
+            ((compact.active_result_bb == length(compact.result_bbs) + 1) ||
+             result_idx == first(compact.result_bbs[compact.active_result_bb].stmts))
         compact.active_result_bb -= 1
         refinish = true
     end
@@ -897,7 +895,7 @@ function kill_edge!(compact::IncrementalCompact, active_bb::Int, from::Int, to::
     # Check if the block is now dead
     if length(preds) == 0
         for succ in copy(compact.result_bbs[compact.bb_rename_succ[to]].succs)
-            kill_edge!(compact, active_bb, to, findfirst(x->x === succ, compact.bb_rename_pred))
+            kill_edge!(compact, active_bb, to, findfirst(x->x === succ, compact.bb_rename_pred)::Int)
         end
         if to < active_bb
             # Kill all statements in the block
@@ -1203,8 +1201,8 @@ function iterate(compact::IncrementalCompact, (idx, active_bb)::Tuple{Int, Int}=
         resize!(compact, old_result_idx)
     end
     bb = compact.ir.cfg.blocks[active_bb]
-    if compact.cfg_transforms_enabled && active_bb > 1 && active_bb <= length(compact.bb_rename_succ) && length(bb.preds) == 0
-        # No predecessors, kill the entire block.
+    if compact.cfg_transforms_enabled && active_bb > 1 && active_bb <= length(compact.bb_rename_succ) && compact.bb_rename_succ[active_bb] == -1
+        # Dead block, so kill the entire block.
         compact.idx = last(bb.stmts)
         # Pop any remaining insertion nodes
         while compact.new_nodes_idx <= length(compact.perm)
@@ -1272,6 +1270,8 @@ function maybe_erase_unused!(extra_worklist, compact, idx, callback = x->nothing
     stmt === nothing && return false
     if compact_exprtype(compact, SSAValue(idx)) === Bottom
         effect_free = false
+    elseif isa(compact.result[idx][:info], MethodResultPure)
+        effect_free = true
     else
         effect_free = stmt_effect_free(stmt, compact.result[idx][:type], compact, compact.ir.sptypes)
     end

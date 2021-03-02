@@ -55,7 +55,7 @@ function find_curblock(domtree::DomTree, allblocks::Vector{Int}, curblock::Int)
     # TODO: This can be much faster by looking at current level and only
     # searching for those blocks in a sorted order
     while !(curblock in allblocks)
-        curblock = domtree.idoms[curblock]
+        curblock = domtree.idoms_bb[curblock]
     end
     return curblock
 end
@@ -258,7 +258,7 @@ function already_inserted(compact::IncrementalCompact, old::OldSSAValue)
     end
     id -= length(compact.ir.stmts)
     if id < length(compact.ir.new_nodes)
-        error()
+        error("")
     end
     id -= length(compact.ir.new_nodes)
     @assert id <= length(compact.pending_nodes)
@@ -290,7 +290,7 @@ function lift_leaves(compact::IncrementalCompact, @nospecialize(stmt),
             else
                 def = compact[leaf]
             end
-            if is_tuple_call(compact, def) && isa(field, Int) && 1 <= field < length(def.args)
+            if is_tuple_call(compact, def) && 1 <= field < length(def.args)
                 lifted = def.args[1+field]
                 if is_old(compact, leaf) && isa(lifted, SSAValue)
                     lifted = OldSSAValue(lifted.id)
@@ -309,8 +309,6 @@ function lift_leaves(compact::IncrementalCompact, @nospecialize(stmt),
                 end
                 (isa(typ, DataType) && (!typ.abstract)) || return nothing
                 @assert !typ.mutable
-                field = try_compute_fieldidx_expr(typ, stmt)
-                field === nothing && return nothing
                 if length(def.args) < 1 + field
                     ftyp = fieldtype(typ, field)
                     if !isbitstype(ftyp)
@@ -325,7 +323,7 @@ function lift_leaves(compact::IncrementalCompact, @nospecialize(stmt),
                     compact[leaf] = nothing
                     for i = (length(def.args) + 1):(1+field)
                         ftyp = fieldtype(typ, i - 1)
-                        isbits(ftyp) || return nothing
+                        isbitstype(ftyp) || return nothing
                         push!(def.args, insert_node!(compact, leaf, result_t, Expr(:new, ftyp)))
                     end
                     compact[leaf] = def
@@ -344,22 +342,22 @@ function lift_leaves(compact::IncrementalCompact, @nospecialize(stmt),
             else
                 typ = compact_exprtype(compact, leaf)
                 if !isa(typ, Const)
+                    # Disabled since #27126
+                    return nothing
                     # If the leaf is an old ssa value, insert a getfield here
                     # We will revisit this getfield later when compaction gets
                     # to the appropriate point.
                     # N.B.: This can be a bit dangerous because it can lead to
                     # infinite loops if we accidentally insert a node just ahead
                     # of where we are
-                    if is_old(compact, leaf) && (isa(field, Int) || isa(field, Symbol))
+                    if is_old(compact, leaf)
                         (isa(typ, DataType) && (!typ.abstract)) || return nothing
                         @assert !typ.mutable
                         # If there's the potential for an undefref error on access, we cannot insert a getfield
-                        if field > typ.ninitialized && !isbits(fieldtype(typ, field))
-                            return nothing
+                        if field > typ.ninitialized && !isbitstype(fieldtype(typ, field))
                             lifted_leaves[leaf] = RefValue{Any}(insert_node!(compact, leaf, make_MaybeUndef(result_t), Expr(:call, :unchecked_getfield, SSAValue(leaf.id), field), true))
                             maybe_undef = true
                         else
-                            return nothing
                             lifted_leaves[leaf] = RefValue{Any}(insert_node!(compact, leaf, result_t, Expr(:call, getfield, SSAValue(leaf.id), field), true))
                         end
                         continue
@@ -517,8 +515,7 @@ function perform_lifting!(compact::IncrementalCompact,
 
     if stmt_val in keys(lifted_leaves)
         stmt_val = lifted_leaves[stmt_val]
-    else
-        isa(stmt_val, Union{SSAValue, OldSSAValue}) && stmt_val in keys(reverse_mapping)
+    elseif isa(stmt_val, Union{NewSSAValue, SSAValue, OldSSAValue}) && stmt_val in keys(reverse_mapping)
         stmt_val = RefValue{Any}(lifted_phis[reverse_mapping[stmt_val]].ssa)
     end
 
@@ -637,6 +634,9 @@ function getfield_elim_pass!(ir::IRCode)
         isa(field, Union{Int, Symbol}) || continue
 
         struct_typ = unwrap_unionall(widenconst(compact_exprtype(compact, stmt.args[2])))
+        if isa(struct_typ, Union) && struct_typ <: Tuple
+            struct_typ = unswitchtupleunion(struct_typ)
+        end
         isa(struct_typ, DataType) || continue
 
         def, typeconstraint = stmt.args[2], struct_typ
@@ -673,7 +673,7 @@ function getfield_elim_pass!(ir::IRCode)
 
         isempty(leaves) && continue
 
-        field = try_compute_fieldidx_expr(struct_typ, stmt)
+        field = try_compute_fieldidx(struct_typ, field)
         field === nothing && continue
 
         r = lift_leaves(compact, stmt, result_t, field, leaves)
@@ -728,7 +728,7 @@ function getfield_elim_pass!(ir::IRCode)
     # IR. This needs to be after we iterate through the IR with
     # `IncrementalCompact` because removing dead blocks can invalidate the
     # domtree.
-    @timeit "domtree 2" domtree = construct_domtree(ir.cfg)
+    @timeit "domtree 2" domtree = construct_domtree(ir.cfg.blocks)
 
     # Now go through any mutable structs and see which ones we can eliminate
     for (idx, (intermediaries, defuse)) in defuses
@@ -808,7 +808,7 @@ function getfield_elim_pass!(ir::IRCode)
                 for stmt in du.uses
                     ir[SSAValue(stmt)] = compute_value_for_use(ir, domtree, allblocks, du, phinodes, fidx, stmt)
                 end
-                if !isbitstype(fieldtype(typ, fidx))
+                if !isbitstype(ftyp)
                     for (use, list) in preserve_uses
                         push!(list, compute_value_for_use(ir, domtree, allblocks, du, phinodes, fidx, use))
                     end

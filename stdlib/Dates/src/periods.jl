@@ -197,6 +197,16 @@ struct CompoundPeriod <: AbstractTime
 end
 
 """
+    Dates.periods(::CompoundPeriod) -> Vector{Period}
+
+Return the `Vector` of `Period`s that comprise the given `CompoundPeriod`.
+
+!!! compat "Julia 1.7"
+    This function requires Julia 1.7 or later.
+"""
+periods(x::CompoundPeriod) = x.periods
+
+"""
     CompoundPeriod(periods) -> CompoundPeriod
 
 Construct a `CompoundPeriod` from a `Vector` of `Period`s. All `Period`s of the same type
@@ -484,6 +494,9 @@ end
 Base.isless(x::FixedPeriod, y::OtherPeriod) = throw(MethodError(isless, (x, y)))
 Base.isless(x::OtherPeriod, y::FixedPeriod) = throw(MethodError(isless, (x, y)))
 
+Base.isless(x::Period, y::CompoundPeriod) = CompoundPeriod(x) < y
+Base.isless(x::CompoundPeriod, y::Period) = x < CompoundPeriod(y)
+Base.isless(x::CompoundPeriod, y::CompoundPeriod) = tons(x) < tons(y)
 # truncating conversions to milliseconds, nanoseconds and days:
 # overflow can happen for periods longer than ~300,000 years
 toms(c::Nanosecond)  = div(value(c), 1000000)

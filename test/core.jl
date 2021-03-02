@@ -6,7 +6,6 @@ using Random, SparseArrays, InteractiveUtils
 
 const Bottom = Union{}
 
-
 # For curmod_*
 include("testenv.jl")
 
@@ -411,7 +410,7 @@ function foo23996(xs...)
     bar(::AbstractFloat) = push!(rets, 2)
     bar(::Bool) = foobar()
     for x in xs
-	bar(x)
+        bar(x)
     end
     rets
 end
@@ -1219,7 +1218,7 @@ end
 # issue #22842
 f22842(x::UnionAll) = UnionAll
 f22842(x::DataType) = length(x.parameters)
-@test f22842(Tuple{Vararg{Int64,N} where N}) == 1
+@test f22842(Tuple{Vararg{Int64}}) == 1
 @test f22842(Tuple{Vararg{Int64,N}} where N) === UnionAll
 
 # issue #1153
@@ -2081,7 +2080,7 @@ mutable struct A6142 <: AbstractMatrix{Float64}; end
 +(x::A6142, y::AbstractRange) = "AbstractRange method called" #16324 ambiguity
 
 # issue #6175
-function g6175(); print(""); (); end
+function g6175(); GC.safepoint(); (); end
 g6175(i::Real, I...) = g6175(I...)
 g6175(i, I...) = tuple(length(i), g6175(I...)...)
 @test g6175(1:5) === (5,)
@@ -2221,7 +2220,7 @@ day_in(obj6387)
 function segfault6793(;gamma=1)
     A = 1
     B = 1
-    print()
+    GC.safepoint()
     return
     -gamma
     nothing
@@ -3327,7 +3326,7 @@ function f11065()
         if i == 1
             z = "z is defined"
         elseif i == 2
-            print(z)
+            print(z) # z is undefined
         end
     end
 end
@@ -4125,15 +4124,6 @@ let ex = quote
     @test ex.args[2] == :test
 end
 
-# issue #25652
-x25652 = 1
-x25652_2 = let (x25652, _) = (x25652, nothing)
-    x25652 = x25652 + 1
-    x25652
-end
-@test x25652_2 == 2
-@test x25652 == 1
-
 # issue #15180
 function f15180(x::T) where T
     X = Vector{T}(undef, 1)
@@ -4244,7 +4234,10 @@ end
 end
 # disable GC to make sure no collection/promotion happens
 # when we are constructing the objects
+get_finalizers_inhibited() = ccall(:jl_gc_get_finalizers_inhibited, Int32, (Ptr{Cvoid},), C_NULL)
 let gc_enabled13995 = GC.enable(false)
+    @assert gc_enabled13995
+    @assert get_finalizers_inhibited() == 0
     finalized13995 = [false, false, false, false]
     create_dead_object13995(finalized13995)
     GC.enable(true)
@@ -4998,7 +4991,8 @@ gVararg(a::fVararg(Int)) = length(a)
     false
 catch e
     (e::ErrorException).msg
-end == "The function body AST defined by this @generated function is not pure. This likely means it contains a closure or comprehension."
+end == "The function body AST defined by this @generated function is not pure. " *
+       "This likely means it contains a closure, a comprehension or a generator."
 
 let x = 1
     global g18444
@@ -5303,6 +5297,16 @@ if Sys.WORD_SIZE == 64
         return
     end
     @test_nowarn tester20360()
+end
+
+# issue #39717
+let a = Base.StringVector(2^17)
+    b = String(a)
+    c = String(a)
+    GC.gc()
+    @test sizeof(a) == 0
+    @test sizeof(b) == 2^17
+    @test sizeof(c) == 0
 end
 
 @test_throws ArgumentError eltype(Bottom)
@@ -7007,7 +7011,6 @@ end
 @test_throws ArgumentError Array{Int, 2}(undef, -1, -1)
 
 # issue #28812
-@test Tuple{Vararg{Array{T},3} where T} === Tuple{Array,Array,Array}
 @test Tuple{Vararg{Array{T} where T,3}} === Tuple{Array,Array,Array}
 
 # issue #29145
@@ -7286,11 +7289,27 @@ end
 
 # issue #36104
 module M36104
+using Test
 struct T36104
     v::Vector{M36104.T36104}
 end
 struct T36104   # check that redefining it works, issue #21816
     v::Vector{T36104}
+end
+# with a gensymmed unionall
+struct Symmetric{T,S<:AbstractMatrix{<:T}} <: AbstractMatrix{T}
+    data::S
+    uplo::Char
+end
+struct Symmetric{T,S<:AbstractMatrix{<:T}} <: AbstractMatrix{T}
+    data::S
+    uplo::Char
+end
+@test_throws ErrorException begin
+    struct Symmetric{T,S<:AbstractMatrix{T}} <: AbstractMatrix{T}
+        data::S
+        uplo::Char
+    end
 end
 end
 @test fieldtypes(M36104.T36104) == (Vector{M36104.T36104},)
@@ -7508,3 +7527,31 @@ let array = Int[]
 end
 @test compare_union37557(Ref{Union{Int,Vector{Int}}}(1),
                          Ref{Union{Int,Vector{Int}}}(1))
+
+# issue #38224
+struct S38224
+    i::Union{Int,Missing}
+end
+@test S38224.zeroinit
+for _ in 1:5
+    let a = Vector{S38224}(undef, 1000000)
+        @test all(x->ismissing(x.i), a)
+    end
+end
+
+# Redefining types with Vararg
+abstract type RedefineVararg; end
+const RedefineVarargN{N} = Tuple{Vararg{RedefineVararg, N}}
+const RedefineVarargN{N} = Tuple{Vararg{RedefineVararg, N}}
+
+# NTuples with non-types
+@test NTuple{3, 2} == Tuple{2, 2, 2}
+
+# issue #18621
+function f18621()
+   g = (k(i) for i in 1:5)
+   k = identity
+   return collect(g)
+end
+@test f18621() == 1:5
+@test [_ for _ in 1:5] == 1:5

@@ -28,7 +28,7 @@ session (technically, in module `Main`), it is always present.
 If memory usage is your concern, you can always replace objects with ones that consume less memory.
  For example, if `A` is a gigabyte-sized array that you no longer need, you can free the memory
 with `A = nothing`.  The memory will be released the next time the garbage collector runs; you can force
-this to happen with [`gc()`](@ref Base.GC.gc). Moreover, an attempt to use `A` will likely result in an error, because most methods are not defined on type `Nothing`.
+this to happen with [`GC.gc()`](@ref Base.GC.gc). Moreover, an attempt to use `A` will likely result in an error, because most methods are not defined on type `Nothing`.
 
 ### How can I modify the declaration of a type in my session?
 
@@ -207,12 +207,12 @@ have two options:
 
 ### What does the `...` operator do?
 
-### The two uses of the `...` operator: slurping and splatting
+#### The two uses of the `...` operator: slurping and splatting
 
 Many newcomers to Julia find the use of `...` operator confusing. Part of what makes the `...`
 operator confusing is that it means two different things depending on context.
 
-### `...` combines many arguments into one argument in function definitions
+#### `...` combines many arguments into one argument in function definitions
 
 In the context of function definitions, the `...` operator is used to combine many different arguments
 into a single argument. This use of `...` for combining many different arguments into a single
@@ -237,7 +237,7 @@ Arg #3 = 3
 If Julia were a language that made more liberal use of ASCII characters, the slurping operator
 might have been written as `<-...` instead of `...`.
 
-### `...` splits one argument into many different arguments in function calls
+#### `...` splits one argument into many different arguments in function calls
 
 In contrast to the use of the `...` operator to denote slurping many different arguments into
 one argument when defining a function, the `...` operator is also used to cause a single function
@@ -621,7 +621,7 @@ the loop, but it cannot algebraically reduce multiple operations into fewer equi
 
 The most reasonable alternative to having integer arithmetic silently overflow is to do checked
 arithmetic everywhere, raising errors when adds, subtracts, and multiplies overflow, producing
-values that are not value-correct. In this [blog post](http://danluu.com/integer-overflow/), Dan
+values that are not value-correct. In this [blog post](https://danluu.com/integer-overflow/), Dan
 Luu analyzes this and finds that rather than the trivial cost that this approach should in theory
 have, it ends up having a substantial cost due to compilers (LLVM and GCC) not gracefully optimizing
 around the added overflow checks. If this improves in the future, we could consider defaulting
